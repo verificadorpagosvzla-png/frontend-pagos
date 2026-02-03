@@ -4,10 +4,31 @@ from supabase import create_client, Client
 import time
 import requests
 import base64
+import os
 from datetime import datetime
 
 # ================= CONFIGURACIÓN =================
-st.set_page_config(page_title="Admin Pagos V7", page_icon="🇻🇪", layout="wide")
+st.set_page_config(page_title="Admin Pagos", page_icon="📱", layout="wide")
+
+# ESTILOS CSS PARA MÓVIL Y LOGO
+st.markdown("""
+    <style>
+    /* Ajuste para que el logo no quede pegado al techo */
+    [data-testid="stSidebar"] img {
+        margin-top: 20px;
+        margin-bottom: 20px;
+    }
+    /* Hacer los botones más grandes y fáciles de tocar en celular */
+    .stButton>button {
+        width: 100%;
+        border-radius: 8px;
+        height: 3em;
+    }
+    /* Ocultar menú de hamburguesa de streamlit para que parezca app */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+    """, unsafe_allow_html=True)
 
 # Credenciales
 SUPABASE_URL = "https://rjdgwsmrjfedppvevkny.supabase.co"
@@ -35,25 +56,15 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- API BINANCE AVANZADA ---
 @st.cache_data(ttl=60)
 def get_tasa_binance(modo="LOW"):
-    """
-    modo="LOW": Compra Barata (Página 1, Primer resultado).
-    modo="HIGH": Compra Cara (Página 3, Primer resultado). Simula el final de la lista.
-    modo="SELL": Venta (A cómo lo pagan los comerciantes).
-    """
+    # (Misma lógica de Binance que ya funcionaba bien)
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-    
-    # Configuración por defecto
     trade_type = "BUY"
     page = 1
     
     if modo == "HIGH":
-        # ESTRATEGIA: Para buscar el precio más alto de COMPRA,
-        # nos saltamos las primeras páginas de ofertas baratas.
-        # Pedimos la página 3 directamente.
         trade_type = "BUY"
         page = 3 
     elif modo == "SELL":
@@ -65,26 +76,19 @@ def get_tasa_binance(modo="LOW"):
         "page": page, "payTypes": ["PagoMovil"], 
         "rows": 10, "tradeType": trade_type 
     }
-    
     try:
         response = requests.post(url, json=data, headers=headers)
         if response.status_code == 200:
             result = response.json()
             if result["data"]:
-                # Si estamos buscando PRECIO ALTO (HIGH), tomamos el último de la lista de esa página
-                # Si estamos buscando PRECIO BAJO (LOW), tomamos el primero (índice 0)
                 idx = -1 if modo == "HIGH" else 0
-                precio = float(result["data"][idx]["adv"]["price"])
-                return precio
+                return float(result["data"][idx]["adv"]["price"])
             elif modo == "HIGH":
-                # Si la página 3 está vacía (raro), intentamos con la página 1 pero el último valor
                 return get_tasa_binance_fallback_high()
-    except Exception as e:
-        pass
+    except: pass
     return None
 
 def get_tasa_binance_fallback_high():
-    # Respaldo: Busca en pagina 1 el ultimo valor (que será más caro que el primero)
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
         data = {"asset": "USDT", "fiat": "VES", "page": 1, "rows": 20, "tradeType": "BUY", "payTypes": ["PagoMovil"]}
@@ -114,7 +118,7 @@ def update_full_pago(id_pago, servicio, tipo):
 def delete_payment(id_pago):
     supabase.table("pagos").delete().eq("id", id_pago).execute()
 
-# ================= LOGIN PERSISTENTE =================
+# ================= LOGIN =================
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 
@@ -129,13 +133,27 @@ if not st.session_state['logged_in'] and "auth" in params:
             st.session_state['user_name'] = USUARIOS[user_url]["nombre"]
     except: pass
 
+def mostrar_logo():
+    # Intenta mostrar logo.png, si no existe, no hace nada para no romper la app
+    if os.path.exists("logo.png"):
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c2:
+            st.image("logo.png", use_container_width=True)
+
 def login():
+    # Espaciador
+    st.write("") 
+    st.write("") 
+    
+    mostrar_logo()
+    
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        st.markdown("## 🔐 Admin Pagos")
+        st.markdown("<h2 style='text-align: center;'>🔐 Acceso Empleados</h2>", unsafe_allow_html=True)
         user = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
-        if st.button("Ingresar", type="primary", use_container_width=True):
+        
+        if st.button("Iniciar Sesión", type="primary"):
             if user in USUARIOS and USUARIOS[user]["pass"] == password:
                 st.session_state['logged_in'] = True
                 st.session_state['user_role'] = USUARIOS[user]["rol"]
@@ -161,46 +179,40 @@ else:
 
     # --- SIDEBAR ---
     with st.sidebar:
+        # LOGO EN SIDEBAR
+        if os.path.exists("logo.png"):
+            st.image("logo.png", use_container_width=True)
+        
         st.title(f"Hola, {st.session_state['user_name']}")
         
         # SOLO ADMIN VE CONFIGURACIÓN
         if st.session_state['user_role'] == 'admin':
             st.divider()
             st.subheader("⚙️ Configuración")
+            opcion_tasa = st.radio("Tasa:", ["Binance (ALTA)", "Binance (BAJA)", "Manual"], index=0)
             
-            opcion_tasa = st.radio(
-                "Fuente Tasa:",
-                ["Binance (Compra - ALTA)", "Binance (Compra - BAJA)", "Manual"],
-                index=0,
-                help="ALTA: Simula el precio más caro de la lista de compra."
-            )
-
             if opcion_tasa == "Manual":
-                tasa_calculo = st.number_input("Tasa Manual", min_value=1.0, value=65.0, format="%.2f")
+                tasa_calculo = st.number_input("Bs/USDT", min_value=1.0, value=65.0, format="%.2f")
             else:
                 modo_api = "HIGH" if "ALTA" in opcion_tasa else "LOW"
                 tasa_api = get_tasa_binance(modo_api)
-                
                 if tasa_api:
                     tasa_calculo = tasa_api
-                    st.success(f"Tasa API: {tasa_calculo:,.2f}")
-                else:
-                    st.error("Error API")
-                    tasa_calculo = 65.0
+                    st.success(f"API: {tasa_calculo:,.2f}")
+                else: tasa_calculo = 65.0
             
             st.divider()
-            modo_vivo = st.checkbox("🔴 En Vivo (Auto-refresh)", value=True)
-        
+            modo_vivo = st.checkbox("🔴 En Vivo", value=True)
         else:
-            # Empleado usa Tasa ALTA por defecto para cálculos internos (aunque no vea totales)
+            # Empleado
             tasa_emp = get_tasa_binance("HIGH")
             if tasa_emp: tasa_calculo = tasa_emp
 
         st.divider()
-        if st.button("Cerrar Sesión"): logout()
+        if st.button("Salir"): logout()
 
     # --- CONTENIDO ---
-    st.title("📊 Gestión de Pagos")
+    st.title("📊 Control de Pagos")
 
     data = get_data()
     
@@ -227,48 +239,70 @@ else:
             u_rev = t_rev / tasa_calculo if tasa_calculo else 0
             u_gen = t_gen / tasa_calculo if tasa_calculo else 0
 
-            st.markdown(f"### 💰 Balance (Tasa: {tasa_calculo:,.2f} Bs/USDT)")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Clientes", f"Bs. {t_cli:,.2f}", f"${u_cli:,.2f}")
-            m2.metric("Revendedores", f"Bs. {t_rev:,.2f}", f"${u_rev:,.2f}")
-            m3.metric("⭐ TOTAL", f"Bs. {t_gen:,.2f}", f"${u_gen:,.2f}")
+            st.markdown(f"### 💰 Balance (Tasa: {tasa_calculo:,.2f})")
+            
+            # Usamos Container con border para simular tarjetas en móvil
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                with st.container(border=True):
+                    st.metric("Clientes", f"Bs. {t_cli:,.0f}", f"${u_cli:,.1f}")
+            with c2:
+                with st.container(border=True):
+                    st.metric("Revendedores", f"Bs. {t_rev:,.0f}", f"${u_rev:,.1f}")
+            with c3:
+                with st.container(border=True):
+                    st.metric("TOTAL", f"Bs. {t_gen:,.0f}", f"${u_gen:,.1f}")
             st.divider()
 
-        # --- LISTA ---
+        # --- LISTA (DISEÑO MÓVIL OPTIMIZADO) ---
         st.subheader("📋 Transacciones")
-        c_h = st.columns([1.5, 1, 1.5, 1.5, 0.5])
-        for c, h in zip(c_h, ["Ref / Hora", "Monto", "Servicio", "Tipo", "Ok"]): c.markdown(f"**{h}**")
-
+        
+        # En Móvil, las tablas se ven mal.
+        # Usaremos "Tarjetas" (Containers con borde) para cada pago.
+        
         for i, row in df.iterrows():
-            with st.container():
-                c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 0.5])
+            # Crear una tarjeta visual para cada transacción
+            with st.container(border=True):
+                # Fila Superior: Info + Monto
+                top1, top2 = st.columns([2, 1])
                 
-                c1.write(f"**{row['referencia']}**")
-                c1.caption(row['fecha_fmt'])
+                with top1:
+                    st.markdown(f"**Ref: {row['referencia']}**")
+                    st.caption(f"📅 {row['fecha_fmt']}")
                 
-                ok = row['servicio'] and row['tipo_cliente']
-                color = "green" if ok else "red"
-                c2.markdown(f":{color}[Bs. {row['monto']}]")
+                with top2:
+                    ok = row['servicio'] and row['tipo_cliente']
+                    color = "green" if ok else "red"
+                    st.markdown(f"<div style='text-align: right; color: {color}; font-weight: bold;'>Bs. {row['monto']}</div>", unsafe_allow_html=True)
                 
-                ix_s = SERVICIOS.index(row['servicio']) + 1 if row['servicio'] in SERVICIOS else 0
-                s_sel = c3.selectbox("S", ["-"] + SERVICIOS, index=ix_s, key=f"s_{row['id']}", label_visibility="collapsed")
+                # Fila Inferior: Selectores y Botón (usamos expander para ahorrar espacio si ya está listo)
+                
+                # Si falta clasificar, lo mostramos abierto. Si está listo, lo ocultamos un poco.
+                expanded_state = not ok 
+                with st.expander("📝 Clasificar / Editar", expanded=expanded_state):
+                    
+                    c_serv, c_tipo, c_save = st.columns([2, 2, 1])
+                    
+                    ix_s = SERVICIOS.index(row['servicio']) + 1 if row['servicio'] in SERVICIOS else 0
+                    s_sel = c_serv.selectbox("Servicio", ["-"] + SERVICIOS, index=ix_s, key=f"s_{row['id']}")
 
-                ix_t = TIPOS_CLIENTE.index(row['tipo_cliente']) + 1 if row['tipo_cliente'] in TIPOS_CLIENTE else 0
-                t_sel = c4.selectbox("T", ["-"] + TIPOS_CLIENTE, index=ix_t, key=f"t_{row['id']}", label_visibility="collapsed")
+                    ix_t = TIPOS_CLIENTE.index(row['tipo_cliente']) + 1 if row['tipo_cliente'] in TIPOS_CLIENTE else 0
+                    t_sel = c_tipo.selectbox("Cliente", ["-"] + TIPOS_CLIENTE, index=ix_t, key=f"t_{row['id']}")
 
-                if (s_sel != "-" and s_sel != row['servicio']) or (t_sel != "-" and t_sel != row['tipo_cliente']):
-                    if c5.button("💾", key=f"sv_{row['id']}"):
-                        v_s = s_sel if s_sel != "-" else None
-                        v_t = t_sel if t_sel != "-" else None
-                        update_full_pago(row['id'], v_s, v_t)
-                        st.toast("Guardado")
-                        time.sleep(0.5)
-                        st.rerun()
-                elif st.session_state['user_role'] == 'admin':
-                     if c5.button("🗑️", key=f"dl_{row['id']}"):
-                        delete_payment(row['id'])
-                        st.rerun()
-                st.divider()
+                    # Botones
+                    if (s_sel != "-" and s_sel != row['servicio']) or (t_sel != "-" and t_sel != row['tipo_cliente']):
+                        if c_save.button("💾", key=f"sv_{row['id']}"):
+                            v_s = s_sel if s_sel != "-" else None
+                            v_t = t_sel if t_sel != "-" else None
+                            update_full_pago(row['id'], v_s, v_t)
+                            st.toast("Guardado")
+                            time.sleep(0.5)
+                            st.rerun()
+                    elif st.session_state['user_role'] == 'admin':
+                         if c_save.button("🗑️", key=f"dl_{row['id']}"):
+                            delete_payment(row['id'])
+                            st.rerun()
+
     else:
         st.info("Sin registros.")
         
