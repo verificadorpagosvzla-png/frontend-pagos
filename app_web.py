@@ -10,23 +10,32 @@ from datetime import datetime
 # ================= CONFIGURACIÓN =================
 st.set_page_config(page_title="Admin Pagos", page_icon="📱", layout="wide")
 
-# ESTILOS CSS PARA MÓVIL Y LOGO
+# Cálculo de ruta absoluta para encontrar el logo siempre
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH = os.path.join(BASE_DIR, "logo.png")
+
+# ESTILOS CSS
 st.markdown("""
     <style>
-    /* Ajuste para que el logo no quede pegado al techo */
     [data-testid="stSidebar"] img {
         margin-top: 20px;
         margin-bottom: 20px;
+        max-width: 80%;
+        margin-left: 10%;
     }
-    /* Hacer los botones más grandes y fáciles de tocar en celular */
     .stButton>button {
         width: 100%;
         border-radius: 8px;
         height: 3em;
     }
-    /* Ocultar menú de hamburguesa de streamlit para que parezca app */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+    /* Centrar logo en login */
+    .login-logo {
+        display: flex;
+        justify-content: center;
+        margin-bottom: 20px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -58,7 +67,6 @@ supabase = init_connection()
 
 @st.cache_data(ttl=60)
 def get_tasa_binance(modo="LOW"):
-    # (Misma lógica de Binance que ya funcionaba bien)
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
     trade_type = "BUY"
@@ -118,10 +126,11 @@ def update_full_pago(id_pago, servicio, tipo):
 def delete_payment(id_pago):
     supabase.table("pagos").delete().eq("id", id_pago).execute()
 
-# ================= LOGIN =================
+# ================= LÓGICA DE SESIÓN =================
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 
+# Auto-login por URL
 params = st.query_params
 if not st.session_state['logged_in'] and "auth" in params:
     try:
@@ -133,59 +142,66 @@ if not st.session_state['logged_in'] and "auth" in params:
             st.session_state['user_name'] = USUARIOS[user_url]["nombre"]
     except: pass
 
-def mostrar_logo():
-    # Intenta mostrar logo.png, si no existe, no hace nada para no romper la app
-    if os.path.exists("logo.png"):
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c2:
-            st.image("logo.png", use_container_width=True)
-
 def login():
-    # Espaciador
     st.write("") 
     st.write("") 
     
-    mostrar_logo()
-    
+    # Columnas para centrar el formulario
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        st.markdown("<h2 style='text-align: center;'>🔐 Acceso Empleados</h2>", unsafe_allow_html=True)
-        user = st.text_input("Usuario")
-        password = st.text_input("Contraseña", type="password")
+        # Mostrar logo usando ruta absoluta y try/except por seguridad
+        if os.path.exists(LOGO_PATH):
+            st.image(LOGO_PATH, use_container_width=True)
+        
+        st.markdown("<h2 style='text-align: center;'>🔐 Acceso Seguro</h2>", unsafe_allow_html=True)
+        
+        # Keys únicos para evitar conflictos
+        user = st.text_input("Usuario", key="login_user")
+        password = st.text_input("Contraseña", type="password", key="login_pass")
         
         if st.button("Iniciar Sesión", type="primary"):
             if user in USUARIOS and USUARIOS[user]["pass"] == password:
                 st.session_state['logged_in'] = True
                 st.session_state['user_role'] = USUARIOS[user]["rol"]
                 st.session_state['user_name'] = USUARIOS[user]["nombre"]
+                
+                # Token persistente
                 token_str = f"{user}:{password}"
                 token_b64 = base64.b64encode(token_str.encode()).decode()
                 st.query_params["auth"] = token_b64
                 st.rerun()
-            else: st.error("Acceso Denegado")
+            else:
+                st.error("Credenciales incorrectas")
 
 def logout():
     st.session_state['logged_in'] = False
     st.query_params.clear()
     st.rerun()
 
-# ================= UI PRINCIPAL =================
+# ================= CONTROL DE FLUJO =================
+# Usamos un placeholder vacío para el login.
+# Si estamos logueados, lo limpiamos para asegurar que no se vea nada.
+login_placeholder = st.empty()
+
 if not st.session_state['logged_in']:
-    login()
+    with login_placeholder.container():
+        login()
 else:
+    login_placeholder.empty() # Borra forzosamente el login si quedó 'pegado'
+    
+    # --- APLICACIÓN PRINCIPAL ---
     # Variables default
     tasa_calculo = 60.00
     modo_vivo = True 
 
     # --- SIDEBAR ---
     with st.sidebar:
-        # LOGO EN SIDEBAR
-        if os.path.exists("logo.png"):
-            st.image("logo.png", use_container_width=True)
+        # LOGO SIDEBAR
+        if os.path.exists(LOGO_PATH):
+            st.image(LOGO_PATH, use_container_width=True)
         
         st.title(f"Hola, {st.session_state['user_name']}")
         
-        # SOLO ADMIN VE CONFIGURACIÓN
         if st.session_state['user_role'] == 'admin':
             st.divider()
             st.subheader("⚙️ Configuración")
@@ -204,7 +220,6 @@ else:
             st.divider()
             modo_vivo = st.checkbox("🔴 En Vivo", value=True)
         else:
-            # Empleado
             tasa_emp = get_tasa_binance("HIGH")
             if tasa_emp: tasa_calculo = tasa_emp
 
@@ -220,7 +235,6 @@ else:
         df = pd.DataFrame(data)
         df['monto_real'] = df['monto'].apply(limpiar_monto_venezuela)
         
-        # Fechas VE
         df['fecha_dt'] = pd.to_datetime(df['fecha'])
         if df['fecha_dt'].dt.tz is None: df['fecha_dt'] = df['fecha_dt'].dt.tz_localize('UTC')
         df['fecha_ve'] = df['fecha_dt'].dt.tz_convert('America/Caracas')
@@ -241,7 +255,6 @@ else:
 
             st.markdown(f"### 💰 Balance (Tasa: {tasa_calculo:,.2f})")
             
-            # Usamos Container con border para simular tarjetas en móvil
             c1, c2, c3 = st.columns(3)
             with c1:
                 with st.container(border=True):
@@ -254,16 +267,11 @@ else:
                     st.metric("TOTAL", f"Bs. {t_gen:,.0f}", f"${u_gen:,.1f}")
             st.divider()
 
-        # --- LISTA (DISEÑO MÓVIL OPTIMIZADO) ---
+        # --- LISTA MÓVIL OPTIMIZADA ---
         st.subheader("📋 Transacciones")
         
-        # En Móvil, las tablas se ven mal.
-        # Usaremos "Tarjetas" (Containers con borde) para cada pago.
-        
         for i, row in df.iterrows():
-            # Crear una tarjeta visual para cada transacción
             with st.container(border=True):
-                # Fila Superior: Info + Monto
                 top1, top2 = st.columns([2, 1])
                 
                 with top1:
@@ -275,9 +283,6 @@ else:
                     color = "green" if ok else "red"
                     st.markdown(f"<div style='text-align: right; color: {color}; font-weight: bold;'>Bs. {row['monto']}</div>", unsafe_allow_html=True)
                 
-                # Fila Inferior: Selectores y Botón (usamos expander para ahorrar espacio si ya está listo)
-                
-                # Si falta clasificar, lo mostramos abierto. Si está listo, lo ocultamos un poco.
                 expanded_state = not ok 
                 with st.expander("📝 Clasificar / Editar", expanded=expanded_state):
                     
@@ -289,7 +294,6 @@ else:
                     ix_t = TIPOS_CLIENTE.index(row['tipo_cliente']) + 1 if row['tipo_cliente'] in TIPOS_CLIENTE else 0
                     t_sel = c_tipo.selectbox("Cliente", ["-"] + TIPOS_CLIENTE, index=ix_t, key=f"t_{row['id']}")
 
-                    # Botones
                     if (s_sel != "-" and s_sel != row['servicio']) or (t_sel != "-" and t_sel != row['tipo_cliente']):
                         if c_save.button("💾", key=f"sv_{row['id']}"):
                             v_s = s_sel if s_sel != "-" else None
