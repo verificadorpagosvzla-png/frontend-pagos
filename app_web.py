@@ -3,11 +3,11 @@ import pandas as pd
 from supabase import create_client, Client
 import time
 import requests
-from datetime import datetime
 import base64
+from datetime import datetime
 
 # ================= CONFIGURACIÓN =================
-st.set_page_config(page_title="Admin Pagos", page_icon="🔐", layout="wide")
+st.set_page_config(page_title="Admin Pagos V7", page_icon="🇻🇪", layout="wide")
 
 # Credenciales
 SUPABASE_URL = "https://rjdgwsmrjfedppvevkny.supabase.co"
@@ -28,40 +28,42 @@ USUARIOS = {
     "saritta":   {"pass": "28032006", "rol": "empleado", "nombre": "Saritta"}
 }
 
-# ================= CONEXIONES Y UTILIDADES =================
+# ================= CONEXIONES =================
 @st.cache_resource
 def init_connection():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 supabase = init_connection()
 
+# --- API BINANCE AVANZADA ---
 @st.cache_data(ttl=60)
-def get_tasa_binance(estrategia="LOW"):
+def get_tasa_binance(modo="LOW"):
     """
-    Consulta API P2P de Binance.
-    estrategia="LOW" -> Trae el precio más bajo de venta (Lo estándar para comprar barato).
-    estrategia="HIGH" -> Intenta traer un precio más alto (usando ofertas de compra).
+    modo="LOW": Compra Barata (Página 1, Primer resultado).
+    modo="HIGH": Compra Cara (Página 3, Primer resultado). Simula el final de la lista.
+    modo="SELL": Venta (A cómo lo pagan los comerciantes).
     """
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
     
-    # Si queremos PRECIO ALTO, buscamos a los que QUIEREN COMPRAR (TradeType SELL),
-    # ya que sus ofertas suelen ser las más altas del listado visible 'Venta'.
-    # Si queremos PRECIO BAJO, buscamos a los que QUIEREN VENDER (TradeType BUY).
-    tipo_trade = "SELL" if estrategia == "HIGH" else "BUY"
+    # Configuración por defecto
+    trade_type = "BUY"
+    page = 1
     
+    if modo == "HIGH":
+        # ESTRATEGIA: Para buscar el precio más alto de COMPRA,
+        # nos saltamos las primeras páginas de ofertas baratas.
+        # Pedimos la página 3 directamente.
+        trade_type = "BUY"
+        page = 3 
+    elif modo == "SELL":
+        trade_type = "SELL"
+        page = 1
+        
     data = {
-        "asset": "USDT",
-        "fiat": "VES",
-        "merchantCheck": False,
-        "page": 1,
-        "payTypes": ["PagoMovil"], 
-        "publisherType": None,
-        "rows": 1, 
-        "tradeType": tipo_trade 
+        "asset": "USDT", "fiat": "VES", "merchantCheck": False,
+        "page": page, "payTypes": ["PagoMovil"], 
+        "rows": 10, "tradeType": trade_type 
     }
     
     try:
@@ -69,10 +71,26 @@ def get_tasa_binance(estrategia="LOW"):
         if response.status_code == 200:
             result = response.json()
             if result["data"]:
-                precio = float(result["data"][0]["adv"]["price"])
+                # Si estamos buscando PRECIO ALTO (HIGH), tomamos el último de la lista de esa página
+                # Si estamos buscando PRECIO BAJO (LOW), tomamos el primero (índice 0)
+                idx = -1 if modo == "HIGH" else 0
+                precio = float(result["data"][idx]["adv"]["price"])
                 return precio
+            elif modo == "HIGH":
+                # Si la página 3 está vacía (raro), intentamos con la página 1 pero el último valor
+                return get_tasa_binance_fallback_high()
     except Exception as e:
         pass
+    return None
+
+def get_tasa_binance_fallback_high():
+    # Respaldo: Busca en pagina 1 el ultimo valor (que será más caro que el primero)
+    try:
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+        data = {"asset": "USDT", "fiat": "VES", "page": 1, "rows": 20, "tradeType": "BUY", "payTypes": ["PagoMovil"]}
+        res = requests.post(url, json=data, headers={"Content-Type": "application/json"}).json()
+        if res["data"]: return float(res["data"][-1]["adv"]["price"])
+    except: pass
     return None
 
 def limpiar_monto_venezuela(monto_input):
@@ -91,15 +109,12 @@ def get_data():
     return response.data
 
 def update_full_pago(id_pago, servicio, tipo):
-    supabase.table("pagos").update({
-        "servicio": servicio,
-        "tipo_cliente": tipo
-    }).eq("id", id_pago).execute()
+    supabase.table("pagos").update({"servicio": servicio, "tipo_cliente": tipo}).eq("id", id_pago).execute()
 
 def delete_payment(id_pago):
     supabase.table("pagos").delete().eq("id", id_pago).execute()
 
-# ================= LOGIN CON PERSISTENCIA =================
+# ================= LOGIN PERSISTENTE =================
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 
@@ -117,7 +132,7 @@ if not st.session_state['logged_in'] and "auth" in params:
 def login():
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        st.markdown("## 🔐 Control de Acceso")
+        st.markdown("## 🔐 Admin Pagos")
         user = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
         if st.button("Ingresar", type="primary", use_container_width=True):
@@ -129,70 +144,62 @@ def login():
                 token_b64 = base64.b64encode(token_str.encode()).decode()
                 st.query_params["auth"] = token_b64
                 st.rerun()
-            else:
-                st.error("Datos incorrectos")
+            else: st.error("Acceso Denegado")
 
 def logout():
     st.session_state['logged_in'] = False
     st.query_params.clear()
     st.rerun()
 
-# ================= INTERFAZ PRINCIPAL =================
+# ================= UI PRINCIPAL =================
 if not st.session_state['logged_in']:
     login()
 else:
-    # Variables globales de configuración (con valores por defecto por seguridad)
+    # Variables default
     tasa_calculo = 60.00
-    modo_vivo = True # Por defecto activado para empleados también
+    modo_vivo = True 
 
-    # --- SIDEBAR (SOLO ADMIN GABY VE LA CONFIGURACIÓN) ---
+    # --- SIDEBAR ---
     with st.sidebar:
         st.title(f"Hola, {st.session_state['user_name']}")
         
-        # Bloque de Configuración (Solo Admin)
+        # SOLO ADMIN VE CONFIGURACIÓN
         if st.session_state['user_role'] == 'admin':
             st.divider()
-            st.subheader("⚙️ Configuración Admin")
+            st.subheader("⚙️ Configuración")
             
-            # Selector de Tasa
-            modo_tasa = st.radio(
-                "Tasa de Referencia:",
-                ["Binance (Mercado Alto/Venta)", "Binance (Mercado Bajo/Compra)", "Manual"],
+            opcion_tasa = st.radio(
+                "Fuente Tasa:",
+                ["Binance (Compra - ALTA)", "Binance (Compra - BAJA)", "Manual"],
                 index=0,
-                help="Alto: Mejor para vendedores. Bajo: Mejor para compradores."
+                help="ALTA: Simula el precio más caro de la lista de compra."
             )
 
-            if modo_tasa == "Manual":
-                tasa_calculo = st.number_input("Tasa Manual (Bs/USDT)", min_value=1.0, value=60.0, step=0.1, format="%.2f")
+            if opcion_tasa == "Manual":
+                tasa_calculo = st.number_input("Tasa Manual", min_value=1.0, value=65.0, format="%.2f")
             else:
-                # Estrategia HIGH busca en SELL (Ofertas de Compra más altas)
-                # Estrategia LOW busca en BUY (Ofertas de Venta más bajas)
-                estrategia = "HIGH" if "Alto" in modo_tasa else "LOW"
-                tasa_api = get_tasa_binance(estrategia)
+                modo_api = "HIGH" if "ALTA" in opcion_tasa else "LOW"
+                tasa_api = get_tasa_binance(modo_api)
                 
                 if tasa_api:
                     tasa_calculo = tasa_api
                     st.success(f"Tasa API: {tasa_calculo:,.2f}")
                 else:
-                    st.error("API Error.")
-                    tasa_calculo = 60.0
+                    st.error("Error API")
+                    tasa_calculo = 65.0
             
             st.divider()
-            # Selector En Vivo
             modo_vivo = st.checkbox("🔴 En Vivo (Auto-refresh)", value=True)
         
         else:
-            # Para el empleado Saritta, calculamos la tasa por defecto (Alta) sin mostrar controles
-            # Ocultamente usamos la tasa alta de Binance para que los cálculos sean consistentes
-            tasa_api_default = get_tasa_binance("HIGH")
-            if tasa_api_default: tasa_calculo = tasa_api_default
-            st.info(f"Tasa del día: {tasa_calculo:,.2f}")
+            # Empleado usa Tasa ALTA por defecto para cálculos internos (aunque no vea totales)
+            tasa_emp = get_tasa_binance("HIGH")
+            if tasa_emp: tasa_calculo = tasa_emp
 
         st.divider()
-        if st.button("Cerrar Sesión"):
-            logout()
+        if st.button("Cerrar Sesión"): logout()
 
-    # --- CONTENIDO PRINCIPAL ---
+    # --- CONTENIDO ---
     st.title("📊 Gestión de Pagos")
 
     data = get_data()
@@ -201,57 +208,54 @@ else:
         df = pd.DataFrame(data)
         df['monto_real'] = df['monto'].apply(limpiar_monto_venezuela)
         
-        # Fechas
+        # Fechas VE
         df['fecha_dt'] = pd.to_datetime(df['fecha'])
         if df['fecha_dt'].dt.tz is None: df['fecha_dt'] = df['fecha_dt'].dt.tz_localize('UTC')
         df['fecha_ve'] = df['fecha_dt'].dt.tz_convert('America/Caracas')
         df['fecha_fmt'] = df['fecha_ve'].dt.strftime('%d/%m %I:%M %p')
 
-        # --- PANEL DE ADMIN (TOTALES) ---
+        # --- ADMIN TOTALES ---
         if st.session_state['user_role'] == 'admin':
-            mask_validos = (df['servicio'].notnull()) & (df['tipo_cliente'].notnull())
-            df_validos = df[mask_validos]
+            mask = (df['servicio'].notnull()) & (df['tipo_cliente'].notnull())
+            df_val = df[mask]
             
-            t_cli = df_validos[df_validos['tipo_cliente'] == 'Cliente']['monto_real'].sum()
-            t_rev = df_validos[df_validos['tipo_cliente'] == 'Revendedor']['monto_real'].sum()
+            t_cli = df_val[df_val['tipo_cliente'] == 'Cliente']['monto_real'].sum()
+            t_rev = df_val[df_val['tipo_cliente'] == 'Revendedor']['monto_real'].sum()
             t_gen = t_cli + t_rev
             
             u_cli = t_cli / tasa_calculo if tasa_calculo else 0
             u_rev = t_rev / tasa_calculo if tasa_calculo else 0
             u_gen = t_gen / tasa_calculo if tasa_calculo else 0
 
-            st.markdown(f"### 💰 Balance General (Tasa: {tasa_calculo:,.2f})")
+            st.markdown(f"### 💰 Balance (Tasa: {tasa_calculo:,.2f} Bs/USDT)")
             m1, m2, m3 = st.columns(3)
             m1.metric("Clientes", f"Bs. {t_cli:,.2f}", f"${u_cli:,.2f}")
             m2.metric("Revendedores", f"Bs. {t_rev:,.2f}", f"${u_rev:,.2f}")
             m3.metric("⭐ TOTAL", f"Bs. {t_gen:,.2f}", f"${u_gen:,.2f}")
             st.divider()
 
-        # --- TABLA ---
+        # --- LISTA ---
         st.subheader("📋 Transacciones")
-        cols = st.columns([1.5, 1, 1.5, 1.5, 0.5])
-        headers = ["Ref / Hora", "Monto", "Servicio", "Tipo", "Ok"]
-        for c, h in zip(cols, headers): c.markdown(f"**{h}**")
+        c_h = st.columns([1.5, 1, 1.5, 1.5, 0.5])
+        for c, h in zip(c_h, ["Ref / Hora", "Monto", "Servicio", "Tipo", "Ok"]): c.markdown(f"**{h}**")
 
-        for index, row in df.iterrows():
+        for i, row in df.iterrows():
             with st.container():
                 c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 0.5])
                 
                 c1.write(f"**{row['referencia']}**")
                 c1.caption(row['fecha_fmt'])
                 
-                listo = row['servicio'] and row['tipo_cliente']
-                color = "green" if listo else "red"
+                ok = row['servicio'] and row['tipo_cliente']
+                color = "green" if ok else "red"
                 c2.markdown(f":{color}[Bs. {row['monto']}]")
                 
-                # Selectores
                 ix_s = SERVICIOS.index(row['servicio']) + 1 if row['servicio'] in SERVICIOS else 0
                 s_sel = c3.selectbox("S", ["-"] + SERVICIOS, index=ix_s, key=f"s_{row['id']}", label_visibility="collapsed")
 
                 ix_t = TIPOS_CLIENTE.index(row['tipo_cliente']) + 1 if row['tipo_cliente'] in TIPOS_CLIENTE else 0
                 t_sel = c4.selectbox("T", ["-"] + TIPOS_CLIENTE, index=ix_t, key=f"t_{row['id']}", label_visibility="collapsed")
 
-                # Botones Acción
                 if (s_sel != "-" and s_sel != row['servicio']) or (t_sel != "-" and t_sel != row['tipo_cliente']):
                     if c5.button("💾", key=f"sv_{row['id']}"):
                         v_s = s_sel if s_sel != "-" else None
@@ -268,7 +272,6 @@ else:
     else:
         st.info("Sin registros.")
         
-    # Auto-refresh (Activo por defecto para todos, solo Admin puede desactivarlo)
     if modo_vivo:
         time.sleep(5)
         st.rerun()
