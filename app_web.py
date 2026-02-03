@@ -3,9 +3,11 @@ import pandas as pd
 from supabase import create_client, Client
 import time
 import requests
+from datetime import datetime
+import base64
 
 # ================= CONFIGURACIÓN =================
-st.set_page_config(page_title="Admin Pagos V4", page_icon="🇻🇪", layout="wide")
+st.set_page_config(page_title="Admin Pagos V6", page_icon="⚡", layout="wide")
 
 # Credenciales
 SUPABASE_URL = "https://rjdgwsmrjfedppvevkny.supabase.co"
@@ -33,28 +35,25 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- NUEVA FUNCIÓN: API BINANCE ---
-@st.cache_data(ttl=60) # Guarda el precio en memoria por 60 segundos para no saturar
-def get_tasa_binance():
+@st.cache_data(ttl=60)
+def get_tasa_binance(tipo_comercio="BUY"):
     """
-    Consulta la API P2P de Binance para obtener la tasa de COMPRA (Buy) de USDT con VES.
-    Filtra por 'PagoMovil' para obtener una tasa realista del mercado venezolano.
+    Consulta API P2P de Binance.
     """
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0" # Simulamos ser un navegador
+        "User-Agent": "Mozilla/5.0"
     }
-    # Payload para buscar anuncios de VENTA (TradeType BUY para nosotros)
     data = {
         "asset": "USDT",
         "fiat": "VES",
         "merchantCheck": False,
         "page": 1,
-        "payTypes": ["PagoMovil"], # Filtro clave para Venezuela
+        "payTypes": ["PagoMovil"], 
         "publisherType": None,
-        "rows": 1, # Solo necesitamos el primero (el mejor precio)
-        "tradeType": "BUY" 
+        "rows": 1, 
+        "tradeType": tipo_comercio 
     }
     
     try:
@@ -65,9 +64,8 @@ def get_tasa_binance():
                 precio = float(result["data"][0]["adv"]["price"])
                 return precio
     except Exception as e:
-        print(f"Error Binance: {e}")
-    
-    return None # Retorna None si falla
+        pass
+    return None
 
 def limpiar_monto_venezuela(monto_input):
     if pd.isna(monto_input): return 0.0
@@ -93,9 +91,24 @@ def update_full_pago(id_pago, servicio, tipo):
 def delete_payment(id_pago):
     supabase.table("pagos").delete().eq("id", id_pago).execute()
 
-# ================= LOGIN =================
+# ================= GESTIÓN DE SESIÓN PERSISTENTE =================
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
+
+# Verificar si hay token en la URL para auto-login (Persistencia F5)
+params = st.query_params
+if not st.session_state['logged_in'] and "auth" in params:
+    try:
+        # Decodificar token (formato user:pass en base64)
+        token_decoded = base64.b64decode(params["auth"]).decode().split(":")
+        user_url, pass_url = token_decoded[0], token_decoded[1]
+        
+        if user_url in USUARIOS and USUARIOS[user_url]["pass"] == pass_url:
+            st.session_state['logged_in'] = True
+            st.session_state['user_role'] = USUARIOS[user_url]["rol"]
+            st.session_state['user_name'] = USUARIOS[user_url]["nombre"]
+    except:
+        pass # Token inválido, no hace nada
 
 def login():
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -108,12 +121,18 @@ def login():
                 st.session_state['logged_in'] = True
                 st.session_state['user_role'] = USUARIOS[user]["rol"]
                 st.session_state['user_name'] = USUARIOS[user]["nombre"]
+                
+                # Generar Token Persistente y ponerlo en URL
+                token_str = f"{user}:{password}"
+                token_b64 = base64.b64encode(token_str.encode()).decode()
+                st.query_params["auth"] = token_b64
                 st.rerun()
             else:
                 st.error("Datos incorrectos")
 
 def logout():
     st.session_state['logged_in'] = False
+    st.query_params.clear() # Limpiar URL
     st.rerun()
 
 # ================= INTERFAZ PRINCIPAL =================
@@ -124,17 +143,36 @@ else:
     with st.sidebar:
         st.title(f"Hola, {st.session_state['user_name']}")
         
-        # Mostrar Tasa Binance en el menú lateral
-        tasa_actual = get_tasa_binance()
-        if tasa_actual:
-            st.metric("Tasa Binance (P2P)", f"Bs. {tasa_actual:,.2f}")
+        st.divider()
+        st.subheader("⚙️ Configuración")
+        
+        modo_tasa = st.radio(
+            "Fuente del Dólar:",
+            ["Binance (Compra - Market)", "Binance (Venta - Alta)", "Manual"],
+            index=0
+        )
+
+        tasa_calculo = 0.0
+        
+        if modo_tasa == "Manual":
+            tasa_calculo = st.number_input("Tasa Bs/USDT", min_value=1.0, value=60.0, step=0.1, format="%.2f")
         else:
-            st.warning("Binance Offline")
+            tipo_api = "SELL" if "Venta" in modo_tasa else "BUY"
+            tasa_api = get_tasa_binance(tipo_api)
+            if tasa_api:
+                tasa_calculo = tasa_api
+                st.success(f"Tasa API: {tasa_calculo:,.2f}")
+            else:
+                st.error("API Offline.")
+                tasa_calculo = 60.0
+        
+        st.divider()
+        modo_vivo = st.checkbox("🔴 En Vivo (Auto-refresh)", value=True)
 
         if st.button("Cerrar Sesión"):
             logout()
-        st.divider()
 
+    # --- MAIN ---
     st.title("📊 Gestión de Pagos")
 
     data = get_data()
@@ -143,82 +181,60 @@ else:
         df = pd.DataFrame(data)
         df['monto_real'] = df['monto'].apply(limpiar_monto_venezuela)
         
-        # --- CORRECCIÓN DE FECHA Y HORA (Venezuela) ---
-        # 1. Convertir a datetime (Supabase da UTC)
+        # Fecha Vzla
         df['fecha_dt'] = pd.to_datetime(df['fecha'])
-        
-        # 2. Si la fecha no tiene zona horaria (naive), le asignamos UTC
         if df['fecha_dt'].dt.tz is None:
             df['fecha_dt'] = df['fecha_dt'].dt.tz_localize('UTC')
-            
-        # 3. Convertir a Hora Venezuela (America/Caracas)
         df['fecha_ve'] = df['fecha_dt'].dt.tz_convert('America/Caracas')
-        
-        # 4. Formatear para mostrar
         df['fecha_fmt'] = df['fecha_ve'].dt.strftime('%d/%m %I:%M %p')
 
-        # --- SECCIÓN DE ADMIN (TOTALES CON USDT) ---
+        # --- ADMIN TOTALES ---
         if st.session_state['user_role'] == 'admin':
-            
             mask_validos = (df['servicio'].notnull()) & (df['tipo_cliente'].notnull())
             df_validos = df[mask_validos]
             
-            total_clientes = df_validos[df_validos['tipo_cliente'] == 'Cliente']['monto_real'].sum()
-            total_revendedores = df_validos[df_validos['tipo_cliente'] == 'Revendedor']['monto_real'].sum()
-            total_general = total_clientes + total_revendedores
+            t_cli = df_validos[df_validos['tipo_cliente'] == 'Cliente']['monto_real'].sum()
+            t_rev = df_validos[df_validos['tipo_cliente'] == 'Revendedor']['monto_real'].sum()
+            t_gen = t_cli + t_rev
             
-            # Cálculo USDT
-            usdt_clientes = total_clientes / tasa_actual if tasa_actual else 0
-            usdt_revendedores = total_revendedores / tasa_actual if tasa_actual else 0
-            usdt_general = total_general / tasa_actual if tasa_actual else 0
+            u_cli = t_cli / tasa_calculo if tasa_calculo else 0
+            u_rev = t_rev / tasa_calculo if tasa_calculo else 0
+            u_gen = t_gen / tasa_calculo if tasa_calculo else 0
 
-            st.markdown("### 💰 Balance General (Bs. / USDT)")
-            
-            # Usamos columnas para mostrar Bs arriba y USDT abajo
+            st.markdown(f"### 💰 Balance (Tasa: {tasa_calculo:,.2f})")
             m1, m2, m3 = st.columns(3)
-            
-            m1.metric("Clientes", f"Bs. {total_clientes:,.2f}", f"${usdt_clientes:,.2f} USDT")
-            m2.metric("Revendedores", f"Bs. {total_revendedores:,.2f}", f"${usdt_revendedores:,.2f} USDT")
-            m3.metric("⭐ TOTAL", f"Bs. {total_general:,.2f}", f"${usdt_general:,.2f} USDT")
-            
-            st.caption(f"*Cálculo basado en tasa P2P Compra: {tasa_actual:,.2f} Bs/USDT*")
+            m1.metric("Clientes", f"Bs. {t_cli:,.2f}", f"${u_cli:,.2f}")
+            m2.metric("Revendedores", f"Bs. {t_rev:,.2f}", f"${u_rev:,.2f}")
+            m3.metric("⭐ TOTAL", f"Bs. {t_gen:,.2f}", f"${u_gen:,.2f}")
             st.divider()
 
-        # --- TABLA DE GESTIÓN ---
-        st.subheader("📋 Transacciones Recientes")
-        
-        h1, h2, h3, h4, h5 = st.columns([1.5, 1, 1.5, 1.5, 0.5])
-        h1.markdown("**Ref / Hora**")
-        h2.markdown("**Monto**")
-        h3.markdown("**Servicio**")
-        h4.markdown("**Tipo**")
-        h5.markdown("**Ok**")
+        # --- TABLA ---
+        st.subheader("📋 Transacciones")
+        cols = st.columns([1.5, 1, 1.5, 1.5, 0.5])
+        for c, h in zip(cols, ["Ref / Hora", "Monto", "Servicio", "Tipo", "Ok"]): c.markdown(f"**{h}**")
 
         for index, row in df.iterrows():
             with st.container():
                 c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 0.5])
                 
                 c1.write(f"**{row['referencia']}**")
-                c1.caption(row['fecha_fmt']) # Ahora muestra hora correcta de Vzla
+                c1.caption(row['fecha_fmt'])
                 
                 listo = row['servicio'] and row['tipo_cliente']
                 color = "green" if listo else "red"
                 c2.markdown(f":{color}[Bs. {row['monto']}]")
                 
-                idx_serv = SERVICIOS.index(row['servicio']) + 1 if row['servicio'] in SERVICIOS else 0
-                sel_servicio = c3.selectbox("S", ["-"] + SERVICIOS, index=idx_serv, key=f"s_{row['id']}", label_visibility="collapsed")
+                ix_s = SERVICIOS.index(row['servicio']) + 1 if row['servicio'] in SERVICIOS else 0
+                s_sel = c3.selectbox("S", ["-"] + SERVICIOS, index=ix_s, key=f"s_{row['id']}", label_visibility="collapsed")
 
-                idx_tipo = TIPOS_CLIENTE.index(row['tipo_cliente']) + 1 if row['tipo_cliente'] in TIPOS_CLIENTE else 0
-                sel_tipo = c4.selectbox("T", ["-"] + TIPOS_CLIENTE, index=idx_tipo, key=f"t_{row['id']}", label_visibility="collapsed")
+                ix_t = TIPOS_CLIENTE.index(row['tipo_cliente']) + 1 if row['tipo_cliente'] in TIPOS_CLIENTE else 0
+                t_sel = c4.selectbox("T", ["-"] + TIPOS_CLIENTE, index=ix_t, key=f"t_{row['id']}", label_visibility="collapsed")
 
-                cambio = (sel_servicio != "-" and sel_servicio != row['servicio']) or \
-                         (sel_tipo != "-" and sel_tipo != row['tipo_cliente'])
-                
-                if cambio:
+                if (s_sel != "-" and s_sel != row['servicio']) or (t_sel != "-" and t_sel != row['tipo_cliente']):
                     if c5.button("💾", key=f"sv_{row['id']}"):
-                        v_serv = sel_servicio if sel_servicio != "-" else None
-                        v_tipo = sel_tipo if sel_tipo != "-" else None
-                        update_full_pago(row['id'], v_serv, v_tipo)
+                        v_s = s_sel if s_sel != "-" else None
+                        v_t = t_sel if t_sel != "-" else None
+                        update_full_pago(row['id'], v_s, v_t)
                         st.toast("Guardado")
                         time.sleep(0.5)
                         st.rerun()
@@ -226,10 +242,10 @@ else:
                      if c5.button("🗑️", key=f"dl_{row['id']}"):
                         delete_payment(row['id'])
                         st.rerun()
-                
                 st.divider()
     else:
         st.info("Sin registros.")
         
-    if st.button("🔄 Refrescar"):
+    if modo_vivo:
+        time.sleep(5)
         st.rerun()
