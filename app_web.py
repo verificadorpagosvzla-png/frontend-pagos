@@ -3,14 +3,14 @@ import pandas as pd
 from supabase import create_client, Client
 import time
 
-# ================= CONFIGURACIÓN INICIAL =================
-st.set_page_config(page_title="Admin Pagos", page_icon="🔐", layout="wide")
+# ================= CONFIGURACIÓN =================
+st.set_page_config(page_title="Admin Pagos V3", page_icon="📊", layout="wide")
 
 # Credenciales
 SUPABASE_URL = "https://rjdgwsmrjfedppvevkny.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqZGd3c21yamZlZHBwdmV2a255Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkyNTkyNTEsImV4cCI6MjA4NDgzNTI1MX0.RUS_ng1rvj1Jz4aVCMhRptUMDKR2hBCY7CUT6wSGKXY"
 
-# Lista de Servicios
+# Listas de opciones
 SERVICIOS = [
     "Netflix", "Disney+", "Amazon Prime", "Spotify", "HBO Max", 
     "YouTube Premium", "Paramount+", "Crunchyroll", "VIKI Rakuten", 
@@ -19,173 +19,214 @@ SERVICIOS = [
     "Gemini", "PornHub", "AppleMusic", "Telegram Premium", "VPN"
 ]
 
-# Usuarios y Roles
+TIPOS_CLIENTE = ["Cliente", "Revendedor"]
+
+# Usuarios
 USUARIOS = {
     "gabyluces": {"pass": "24012026", "rol": "admin", "nombre": "Gaby"},
     "saritta":   {"pass": "28032006", "rol": "empleado", "nombre": "Saritta"}
 }
 
-# ================= CONEXIÓN Y FUNCIONES =================
+# ================= CONEXIÓN Y UTILIDADES =================
 @st.cache_resource
 def init_connection():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 supabase = init_connection()
 
-def limpiar_monto_venezuela(monto_str):
+def limpiar_monto_venezuela(monto_input):
     """
-    Convierte '2.112,50' -> 2112.50 (Float)
-    Lógica: Elimina puntos de miles, cambia coma decimal por punto.
+    Convierte formatos como '2.112,50' o 'Bs. 2.112,50' a float 2112.50
+    Asume formato VE: Punto = Miles, Coma = Decimal.
     """
-    if not isinstance(monto_str, str):
-        return float(monto_str)
+    if pd.isna(monto_input): return 0.0
     
-    # 1. Eliminar puntos (separador de miles en VE)
-    limpio = monto_str.replace('.', '')
-    # 2. Reemplazar coma por punto (separador decimal en Python)
-    limpio = limpio.replace(',', '.')
+    # Convertir a string y limpiar letras
+    texto = str(monto_input).upper().replace('BS', '').replace('USD', '').strip()
+    
+    # Caso 1: Si ya viene limpio como "2112.5" (Formato inglés/computadora)
+    # y no tiene comas, intentamos convertir directo.
+    if '.' in texto and ',' not in texto:
+        try:
+            return float(texto)
+        except: pass
+
+    # Caso 2: Formato Venezuela "2.112,50"
+    # Eliminar puntos de miles
+    texto_sin_miles = texto.replace('.', '')
+    # Reemplazar coma decimal por punto
+    texto_final = texto_sin_miles.replace(',', '.')
     
     try:
-        return float(limpio)
+        return float(texto_final)
     except:
         return 0.0
 
 def get_data():
-    # Traemos los últimos 70 pagos
-    response = supabase.table("pagos").select("*").order("id", desc=True).limit(70).execute()
+    response = supabase.table("pagos").select("*").order("id", desc=True).limit(80).execute()
     return response.data
 
-def update_servicio(id_pago, servicio_nombre):
-    supabase.table("pagos").update({"servicio": servicio_nombre}).eq("id", id_pago).execute()
+def update_full_pago(id_pago, servicio, tipo):
+    """Actualiza servicio y tipo de cliente al mismo tiempo"""
+    supabase.table("pagos").update({
+        "servicio": servicio,
+        "tipo_cliente": tipo
+    }).eq("id", id_pago).execute()
 
 def delete_payment(id_pago):
     supabase.table("pagos").delete().eq("id", id_pago).execute()
 
-# ================= SISTEMA DE LOGIN =================
-
+# ================= LOGIN =================
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
-    st.session_state['user_role'] = None
-    st.session_state['user_name'] = None
 
 def login():
-    st.markdown("## 🔐 Iniciar Sesión")
-    user = st.text_input("Usuario")
-    password = st.text_input("Contraseña", type="password")
-    
-    if st.button("Entrar"):
-        if user in USUARIOS and USUARIOS[user]["pass"] == password:
-            st.session_state['logged_in'] = True
-            st.session_state['user_role'] = USUARIOS[user]["rol"]
-            st.session_state['user_name'] = USUARIOS[user]["nombre"]
-            st.rerun()
-        else:
-            st.error("Usuario o contraseña incorrectos")
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.markdown("## 🔐 Control de Acceso")
+        user = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        if st.button("Ingresar", type="primary", use_container_width=True):
+            if user in USUARIOS and USUARIOS[user]["pass"] == password:
+                st.session_state['logged_in'] = True
+                st.session_state['user_role'] = USUARIOS[user]["rol"]
+                st.session_state['user_name'] = USUARIOS[user]["nombre"]
+                st.rerun()
+            else:
+                st.error("Datos incorrectos")
 
 def logout():
     st.session_state['logged_in'] = False
     st.rerun()
 
-# ================= INTERFAZ PRINCIPAL =================
+# ================= INTERFAZ =================
 
 if not st.session_state['logged_in']:
     login()
 else:
-    # --- BARRA LATERAL ---
+    # --- SIDEBAR ---
     with st.sidebar:
-        st.write(f"Hola, **{st.session_state['user_name']}** ({st.session_state['user_role'].upper()})")
+        st.title(f"Hola, {st.session_state['user_name']}")
+        st.caption(f"Rol: {st.session_state['user_role'].upper()}")
+        
         if st.button("Cerrar Sesión"):
             logout()
+            
         st.divider()
-        st.info("💡 Solo los pagos asignados a un servicio suman al total.")
+        st.info("ℹ️ Para que un pago se sume al total, debe tener asignado un **Servicio** y un **Tipo de Cliente**.")
 
-    st.title("💸 Gestión de Suscripciones")
+    st.title("📊 Gestión de Pagos y Suscripciones")
 
-    # --- OBTENCIÓN Y PROCESAMIENTO DE DATOS ---
+    # --- DATOS ---
     data = get_data()
     
     if data:
         df = pd.DataFrame(data)
-        
-        # Procesar columna monto (Corrección numérica)
+        # Limpieza de datos
         df['monto_real'] = df['monto'].apply(limpiar_monto_venezuela)
-        
-        # Procesar fechas
-        df['fecha_fmt'] = pd.to_datetime(df['fecha']).dt.strftime('%d/%m %I:%M %p')
+        df['fecha_fmt'] = pd.to_datetime(df['fecha']).dt.strftime('%d/%m %H:%M')
 
-        # --- LÓGICA DE TOTALES (Solo para Admin) ---
+        # --- SECCIÓN DE ADMIN (TOTALES) ---
         if st.session_state['user_role'] == 'admin':
-            # Filtrar solo los que tienen servicio asignado (no nulos)
-            pagos_asignados = df[df['servicio'].notnull()]
-            total_recaudado = pagos_asignados['monto_real'].sum()
             
-            # Métricas
-            c1, c2, c3 = st.columns(3)
-            c1.metric("💰 Total Confirmado", f"Bs. {total_recaudado:,.2f}", help="Suma solo de pagos enlazados")
-            c2.metric("📋 Transacciones Totales", len(df))
-            c3.metric("✅ Enlazados", len(pagos_asignados))
-            st.divider()
-        
-        elif st.session_state['user_role'] == 'empleado':
-            st.warning("⚠️ Modo Empleado: Visualización de totales restringida.")
+            # Filtros para cálculos
+            # Solo sumamos si tienen servicio Y tipo asignado
+            mask_validos = (df['servicio'].notnull()) & (df['tipo_cliente'].notnull())
+            df_validos = df[mask_validos]
+            
+            # Totales separados
+            total_clientes = df_validos[df_validos['tipo_cliente'] == 'Cliente']['monto_real'].sum()
+            total_revendedores = df_validos[df_validos['tipo_cliente'] == 'Revendedor']['monto_real'].sum()
+            total_general = total_clientes + total_revendedores
+            
+            # Tarjetas de Métricas
+            st.markdown("### 💰 Balance General")
+            m1, m2, m3 = st.columns(3)
+            
+            m1.metric("Clientes Comunes", f"Bs. {total_clientes:,.2f}")
+            m2.metric("Revendedores", f"Bs. {total_revendedores:,.2f}")
+            m3.metric("⭐ INGRESO TOTAL", f"Bs. {total_general:,.2f}", delta="Confirmado")
+            
             st.divider()
 
         # --- TABLA DE GESTIÓN ---
-        col_ref, col_monto, col_serv, col_accion = st.columns([2, 1.5, 2, 1])
+        st.subheader("📋 Listado de Transacciones")
         
-        # Encabezados
-        col_ref.markdown("**Referencia / Fecha**")
-        col_monto.markdown("**Monto**")
-        col_serv.markdown("**Asignar Servicio**")
-        col_accion.markdown("**Acción**")
+        # Encabezados visuales
+        h1, h2, h3, h4, h5 = st.columns([1.5, 1, 1.5, 1.5, 0.5])
+        h1.markdown("**Referencia**")
+        h2.markdown("**Monto**")
+        h3.markdown("**Servicio**")
+        h4.markdown("**Tipo Cliente**")
+        h5.markdown("**Go**")
 
         for index, row in df.iterrows():
             with st.container():
-                c1, c2, c3, c4 = st.columns([2, 1.5, 2, 1])
+                c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 0.5])
                 
-                # 1. Referencia
+                # 1. Info
                 c1.write(f"**{row['referencia']}**")
                 c1.caption(row['fecha_fmt'])
                 
-                # 2. Monto (Verde si está asignado, Gris si no)
-                color_monto = "green" if row['servicio'] else "gray"
-                c2.markdown(f":{color_monto}[Bs. {row['monto']}]")
+                # 2. Monto
+                # Color verde si ya está "Listo" (tiene servicio y tipo), gris si falta algo
+                listo = row['servicio'] and row['tipo_cliente']
+                color = "green" if listo else "red"
+                c2.markdown(f":{color}[Bs. {row['monto']}]")
                 
-                # 3. Selector de Servicio
-                # Detectar índice actual para mostrar el valor guardado
-                idx_actual = 0
+                # 3. Selector Servicio
+                idx_serv = 0
                 if row['servicio'] in SERVICIOS:
-                    idx_actual = SERVICIOS.index(row['servicio'])
+                    idx_serv = SERVICIOS.index(row['servicio']) + 1
                 
-                # El selectbox permite cambiar el servicio
-                nuevo_servicio = c3.selectbox(
-                    "Servicio", 
-                    options=["Sin asignar"] + SERVICIOS, 
-                    index=idx_actual + 1 if row['servicio'] else 0,
-                    key=f"sel_{row['id']}",
+                sel_servicio = c3.selectbox(
+                    "Serv", 
+                    options=["-"] + SERVICIOS, 
+                    index=idx_serv, 
+                    key=f"srv_{row['id']}", 
                     label_visibility="collapsed"
                 )
 
-                # 4. Botones de Acción
-                # Botón Guardar (Solo aparece si cambias el valor o si no está guardado)
-                if nuevo_servicio != "Sin asignar" and nuevo_servicio != row['servicio']:
-                    if c4.button("💾", key=f"save_{row['id']}", help="Guardar cambio"):
-                        update_servicio(row['id'], nuevo_servicio)
-                        st.toast(f"Asignado a {nuevo_servicio}")
+                # 4. Selector Tipo Cliente
+                idx_tipo = 0
+                if row['tipo_cliente'] in TIPOS_CLIENTE:
+                    idx_tipo = TIPOS_CLIENTE.index(row['tipo_cliente']) + 1
+                
+                sel_tipo = c4.selectbox(
+                    "Tipo", 
+                    options=["-"] + TIPOS_CLIENTE, 
+                    index=idx_tipo, 
+                    key=f"tip_{row['id']}", 
+                    label_visibility="collapsed"
+                )
+
+                # 5. Botón Guardar (Solo aparece si hay cambios pendientes por guardar)
+                # O si falta asignar algo para completarlo
+                
+                # Detectar cambios
+                cambio_serv = sel_servicio != "-" and sel_servicio != row['servicio']
+                cambio_tipo = sel_tipo != "-" and sel_tipo != row['tipo_cliente']
+                
+                if cambio_serv or cambio_tipo:
+                    if c5.button("💾", key=f"save_{row['id']}"):
+                        val_serv = sel_servicio if sel_servicio != "-" else None
+                        val_tipo = sel_tipo if sel_tipo != "-" else None
+                        
+                        update_full_pago(row['id'], val_serv, val_tipo)
+                        st.toast("¡Actualizado!")
                         time.sleep(0.5)
                         st.rerun()
                 
                 # Botón Borrar (Solo Admin)
-                if st.session_state['user_role'] == 'admin':
-                    if c4.button("🗑️", key=f"del_{row['id']}"):
+                elif st.session_state['user_role'] == 'admin':
+                     if c5.button("🗑️", key=f"del_{row['id']}"):
                         delete_payment(row['id'])
                         st.rerun()
                 
                 st.divider()
 
     else:
-        st.info("No hay pagos registrados esperando gestión.")
-
-    # Botón manual de recarga
-    if st.button("🔄 Refrescar Lista"):
+        st.info("No hay pagos registrados.")
+        
+    if st.button("🔄 Refrescar"):
         st.rerun()
